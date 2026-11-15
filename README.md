@@ -127,4 +127,10 @@ The repository contains Go sources, tests, `install.sh`, `install-event-watch.sh
 
 ## License
 
-**No license file has been selected yet.** Until a license is added by the repository owner, do not assume permission to redistribute or modify the code beyond applicable law. Contributions and third-party packaging should wait for a clear licensing decision.
+**GNU GPL v3.0 only** — free to use, modify, fork and redistribute, including commercially. If you distribute a modified version, follow GPLv3 requirements: keep the license and notices, mark modifications, and make the corresponding source available to recipients under GPLv3. Private modifications need not be published. See [LICENSE](LICENSE).
+
+**Share your work:** Publish your improved version in a public GitHub fork, push your changes, and optionally submit a pull request adding a link and a short description to [COMMUNITY-FORKS.md](COMMUNITY-FORKS.md). This helps everyone discover and reuse your improvements. A pull request or public GitHub push is encouraged, **not required by GPLv3**; providing source to recipients of distributed copies is required.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to share improvements. Versions of this project already made available under a different license remain available under the terms valid for those versions.
+
+**Source and releases:** https://github.com/Fort-fog/PortGuard-Mini
