@@ -1,0 +1,7 @@
+portguard
+portguard.next
+*.test
+*.log
+*.tar.gz
+*.zip
+.env
