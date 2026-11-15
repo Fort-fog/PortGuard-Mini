@@ -174,6 +174,47 @@ func (w *eventWatcher) process(buf []byte) {
 	}
 }
 
+// runEventLoop uses nonblocking inotify reads so SIGTERM/SIGINT can be
+// observed without relying on close(2) to interrupt a read in another thread.
+func runEventLoop(watcher *eventWatcher, stop <-chan os.Signal) error {
+	if err := syscall.SetNonblock(watcher.fd, true); err != nil {
+		return fmt.Errorf("set inotify nonblocking: %w", err)
+	}
+	// A bounded idle wait avoids a busy loop and allows graceful shutdown
+	// even when no files are changing. It adds no external dependency.
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	buf := make([]byte, 256*1024)
+	for {
+		select {
+		case <-stop:
+			fmt.Println("PortGuard EVENT WATCH stopped")
+			return nil
+		default:
+		}
+		n, readErr := syscall.Read(watcher.fd, buf)
+		if n > 0 {
+			watcher.process(buf[:n])
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, syscall.EINTR) {
+			continue
+		}
+		if errors.Is(readErr, syscall.EAGAIN) || errors.Is(readErr, syscall.EWOULDBLOCK) {
+			select {
+			case <-stop:
+				fmt.Println("PortGuard EVENT WATCH stopped")
+				return nil
+			case <-ticker.C:
+				continue
+			}
+		}
+		return fmt.Errorf("read inotify events: %w", readErr)
+	}
+}
+
 func watchSecurity() error {
 	if os.Geteuid() != 0 {
 		return errors.New("watch-security requires root (to monitor protected directories)")
@@ -186,7 +227,6 @@ func watchSecurity() error {
 	if err = watcher.addTargets(securityTargets); err != nil {
 		return err
 	}
-	// Force immediate journald delivery even when the service has no terminal.
 	fmt.Printf("PortGuard EVENT WATCH started %s; %d directories; READ ONLY\n", time.Now().Format(time.RFC3339), len(watcher.byPath))
 	if len(watcher.byPath) == 0 {
 		return errors.New("no watchable directories")
@@ -194,24 +234,7 @@ func watchSecurity() error {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
-	go func() { <-sig; _ = syscall.Close(watcher.fd) }()
-	buf := make([]byte, 256*1024)
-	for {
-		n, readErr := syscall.Read(watcher.fd, buf)
-		if n > 0 {
-			watcher.process(buf[:n])
-		}
-		if readErr != nil {
-			if errors.Is(readErr, syscall.EINTR) {
-				continue
-			}
-			if errors.Is(readErr, syscall.EBADF) {
-				fmt.Println("PortGuard EVENT WATCH stopped")
-				return nil
-			}
-			return readErr
-		}
-	}
+	return runEventLoop(watcher, sig)
 }
 
 func watchedDirectoriesPreview(targets []string) []string {
