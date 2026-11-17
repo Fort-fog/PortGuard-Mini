@@ -1,11 +1,16 @@
-# Публикация PortGuard Mini v0.8.1
+# PortGuard Mini — Publication Status
 
-Это отдельная копия для GitHub: без бинарника и адреса рабочего VPS.
+**Current release: v0.8.4**
 
-Сборка: `go test ./...`, `go vet ./...`, `go build -o portguard .`.
+The authoritative current-version documents are:
 
-В README-RU.md сохранена история предыдущих версий, включая команды обновления. Адреса `203.0.113.10` и `198.51.100.10` являются примерами, не реальными серверами.
+- `README.md` — project overview and current release.
+- `README-RU.md` — Russian documentation; older per-version instructions below the current header are retained explicitly as historical documentation.
+- `CHANGELOG.md` — version history from v0.1 through v0.8.4.
+- `RELEASE-NOTES-v0.8.4-RU.md` — current release notes.
 
-В архиве исходников отсутствует LICENSE. Перед объявлением проекта open-source правообладатель должен выбрать и добавить лицензию.
+## v0.8.4
 
-Автоматическая остановка сессий и автоматическое выключение VPS не реализованы. Не представляйте инструмент как гарантированную защиту от захвата root.
+v0.8.4 is a targeted bugfix over v0.8.3. It fixes detection of the active standard Nginx `include /etc/nginx/conf.d/*.conf;` directive when valid whitespace or comments are present. No new subsystem, dependency, automatic blocking, automatic shutdown, cloud service, database, or framework was added.
+
+Older GitHub releases and tags are retained as historical artifacts. They are not the current version.

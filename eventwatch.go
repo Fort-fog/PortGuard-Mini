@@ -140,14 +140,14 @@ func (w *eventWatcher) event(path string, mask uint32) {
 	fmt.Printf("EVENT SECURITY %s %q\n", strings.Join(names, ","), path)
 }
 
-func (w *eventWatcher) process(buf []byte) {
+func (w *eventWatcher) process(buf []byte) error {
+	rebuild := false
 	for len(buf) >= 16 {
 		wd := int(int32(binary.LittleEndian.Uint32(buf[0:4])))
 		mask := binary.LittleEndian.Uint32(buf[4:8])
 		length := int(binary.LittleEndian.Uint32(buf[12:16]))
 		if length < 0 || length > len(buf)-16 {
-			fmt.Println("WARN EVENT malformed kernel notification")
-			return
+			return errors.New("malformed inotify notification; watch needs restart")
 		}
 		name := strings.TrimRight(string(buf[16:16+length]), "\x00")
 		base := w.byWD[wd]
@@ -157,21 +157,32 @@ func (w *eventWatcher) process(buf []byte) {
 		}
 		if mask&syscall.IN_Q_OVERFLOW != 0 {
 			w.event("", mask)
+			rebuild = true
 		}
 		if base != "" {
 			w.event(full, mask)
+			// A moved/deleted watched directory can invalidate cached path mappings.
+			if mask&(syscall.IN_MOVE_SELF|syscall.IN_DELETE_SELF|syscall.IN_IGNORED) != 0 ||
+				mask&syscall.IN_ISDIR != 0 && mask&syscall.IN_MOVED_FROM != 0 {
+				rebuild = true
+			}
 			if mask&syscall.IN_IGNORED != 0 {
 				delete(w.byWD, wd)
 				delete(w.byPath, base)
 			}
 			if mask&syscall.IN_ISDIR != 0 && mask&(syscall.IN_CREATE|syscall.IN_MOVED_TO) != 0 {
 				if err := w.addTree(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					fmt.Printf("WARN EVENT new directory watch %q: %v\n", full, err)
+					fmt.Printf("WARN EVENT new directory watch %q: %q\n", full, err.Error())
+					rebuild = true
 				}
 			}
 		}
 		buf = buf[16+length:]
 	}
+	if rebuild || len(buf) != 0 {
+		return errors.New("inotify watch coverage invalidated; restart watcher to rebuild; audit recommended")
+	}
+	return nil
 }
 
 // runEventLoop uses nonblocking inotify reads so SIGTERM/SIGINT can be
@@ -194,7 +205,10 @@ func runEventLoop(watcher *eventWatcher, stop <-chan os.Signal) error {
 		}
 		n, readErr := syscall.Read(watcher.fd, buf)
 		if n > 0 {
-			watcher.process(buf[:n])
+			if err := watcher.process(buf[:n]); err != nil {
+				// The existing systemd Restart=on-failure policy rebuilds all watches.
+				return err
+			}
 		}
 		if readErr == nil {
 			continue

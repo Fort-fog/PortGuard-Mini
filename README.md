@@ -4,9 +4,14 @@
 
 PortGuard Mini checks SSH activity, listening TCP ports, services, running processes, and changes to security-sensitive files. It combines periodic baseline audits with an optional Linux inotify event watcher. No cloud account, database, Docker, or third-party Go modules are required.
 
-> **Status: experimental (v0.8.1).** This is a monitoring and incident-investigation tool, **not** a proven intrusion-prevention system, antivirus, or replacement for operating-system security updates. Test it on a non-production system first.
+> **Status: experimental (v0.8.4).** This is a monitoring and incident-investigation tool, **not** a proven intrusion-prevention system, antivirus, or replacement for operating-system security updates. Test it on a non-production system first.
 
 **Documentation:** [Русская документация / Russian documentation](README-RU.md)
+
+**Current release:** `v0.8.4`
+**Release notes:** [v0.8.4 (RU)](RELEASE-NOTES-v0.8.4-RU.md)
+**Version history:** [CHANGELOG.md](CHANGELOG.md)
+
 
 ## Features
 
@@ -43,7 +48,7 @@ The above audit is intended to inspect the machine; it does not establish a secu
 
 ## Install on a test server
 
-Read both scripts **before** running them. `install.sh` installs the binary at `/usr/local/sbin/portguard` and installs/enables a **read-only** audit service with a five-minute systemd timer. It may replace existing PortGuard audit unit files; do not use it as an in-place updater on an already configured server.
+Read both scripts **before** running them. `install.sh` installs the binary at `/usr/local/sbin/portguard` and installs/enables a **read-only** audit service with a five-minute systemd timer. It is a fresh-install script: it refuses to overwrite existing PortGuard binaries and unit files. Do not rerun it to update an installed server.
 
 ```bash
 sudo sh install.sh
@@ -73,7 +78,7 @@ sudo /usr/local/sbin/portguard audit
 - Security baseline: `/var/lib/portguard-mini/security.json`
 - Optional TCP-listener baseline: `/var/lib/portguard-mini/ports.json` (created with `portguard baseline`)
 
-The security-baseline command intentionally refuses to overwrite an existing baseline. **Do not erase or regenerate baselines to make an unexplained alert disappear.** Save and investigate differences first. Baselines are stored locally and can be tampered with by an attacker who already controls root.
+Both baseline commands now atomically create private snapshots and refuse to overwrite existing baselines. **Do not erase or regenerate baselines to make an unexplained alert disappear.** Save and investigate differences first. Baselines are stored locally and can be tampered with by an attacker who already controls root.
 
 ## Trusted root SSH keys
 
@@ -103,11 +108,13 @@ A successful login with an unknown key is **an investigation signal, not indepen
 | `emergency-off POWER_OFF` | **Dangerous**: explicitly request server shutdown |
 | `apply`, `rollback`, `watch` | **Legacy configuration-changing paths:** review the source and implications before running; `watch` repeatedly invokes `apply` |
 
+The original manual hardening modes remain available for supported Debian/Ubuntu SSH, Apache, Nginx and PHP configurations. They are not invoked by the periodic auditor. See [v0.8.4 release notes](RELEASE-NOTES-v0.8.4-RU.md) for the latest targeted repair.
+
 **Never schedule `watch` as a monitoring service.** The supplied `portguard-mini.timer` invokes `audit`, not `watch` or `apply`.
 
 ## Limitations
 
-- inotify can miss events while the watcher is stopped and during queue overflow; a file event alone cannot identify an attacker.
+- inotify can miss events while the watcher is stopped and during queue overflow; a file event alone cannot identify an attacker. When watch coverage is invalidated the watcher exits with an error, allowing the installed systemd restart policy to rebuild its watches; manual runs must be restarted.
 - Periodic polling may miss short-lived network/process activity.
 - Detection relies in part on Linux utilities and journal formats; unavailable or changed data can reduce visibility.
 - Local logs and baselines cannot be trusted after a confirmed root compromise.

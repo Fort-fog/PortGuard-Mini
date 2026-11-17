@@ -88,7 +88,14 @@ func checkSelfProtection() {
 		fmt.Println("WARN SELF systemctl unavailable")
 		return
 	}
-	for _, unit := range []string{"portguard-mini.timer", "portguard-event.service"} {
+	units := []string{"portguard-mini.timer", "portguard-event.service"}
+	load, loadErr := exec.Command("systemctl", "show", "portguard-event.service", "-p", "LoadState", "--value").Output()
+	optionalAbsent := loadErr == nil && strings.TrimSpace(string(load)) == "not-found"
+	if optionalAbsent {
+		units = units[:1]
+		fmt.Println("NOTE SELF optional event watcher not installed")
+	}
+	for _, unit := range units {
 		if !serviceActive(unit) {
 			fmt.Println("ALERT SELF INACTIVE", unit)
 		} else {
@@ -98,6 +105,9 @@ func checkSelfProtection() {
 		if err != nil || strings.TrimSpace(string(out)) != "enabled" {
 			fmt.Printf("ALERT SELF NOT ENABLED %s state=%q\n", unit, strings.TrimSpace(string(out)))
 		}
+	}
+	if optionalAbsent {
+		return
 	}
 	out, err := exec.Command("systemctl", "show", "portguard-event.service", "-p", "MainPID", "-p", "NRestarts", "-p", "Restart").Output()
 	if err != nil {

@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -24,11 +23,19 @@ const sshManagedPath = "/etc/ssh/sshd_config.d/00-portguard-mini.conf"
 const statePath = "/var/lib/portguard-mini/ports.json"
 const marker = "# Managed by PortGuard Mini - do not edit; remove via portguard rollback\n"
 
+const iniMarker = "; Managed by PortGuard Mini - do not edit; remove via portguard rollback\n"
+
 type change struct {
-	path    string
-	old     []byte
-	existed bool
+	path      string
+	old, body []byte
+	existed   bool
+	mode      fs.FileMode
 }
+
+func managed(body []byte) bool {
+	return strings.HasPrefix(string(body), marker) || strings.HasPrefix(string(body), iniMarker)
+}
+
 type plan struct {
 	files  []change
 	reload []string
@@ -63,18 +70,26 @@ func addFile(p *plan, path, body string) error {
 		if string(old) == body {
 			return nil
 		}
-		if !strings.HasPrefix(string(old), marker) {
+		if !managed(old) {
 			return fmt.Errorf("%s: existing unmanaged file, refusing overwrite", path)
 		}
-		p.files = append(p.files, change{path, old, true})
+		p.files = append(p.files, change{path: path, old: old, body: []byte(body), existed: true, mode: st.Mode().Perm()})
 	} else if errors.Is(err, fs.ErrNotExist) {
-		p.files = append(p.files, change{path, nil, false})
+		p.files = append(p.files, change{path: path, body: []byte(body)})
 	} else {
 		return err
 	}
 	return nil
 }
 func atomicWrite(path string, data []byte) error {
+	return atomicWriteMode(path, data, 0644)
+}
+func atomicWriteMode(path string, data []byte, mode fs.FileMode) error {
+	return atomicWriteFile(path, data, mode, true)
+}
+
+// Baselines are published atomically without replacing an existing reference.
+func atomicWriteFile(path string, data []byte, mode fs.FileMode, replace bool) error {
 	dir := filepath.Dir(path)
 	st, err := os.Lstat(dir)
 	if err != nil {
@@ -89,7 +104,7 @@ func atomicWrite(path string, data []byte) error {
 	}
 	name := temp.Name()
 	defer os.Remove(name)
-	if err = temp.Chmod(0644); err != nil {
+	if err = temp.Chmod(mode); err != nil {
 		temp.Close()
 		return err
 	}
@@ -104,6 +119,9 @@ func atomicWrite(path string, data []byte) error {
 	if err = temp.Close(); err != nil {
 		return err
 	}
+	if !replace {
+		return os.Link(name, path)
+	}
 	return os.Rename(name, path)
 }
 func restore(changes []change) error {
@@ -112,7 +130,7 @@ func restore(changes []change) error {
 		c := changes[i]
 		var err error
 		if c.existed {
-			err = atomicWrite(c.path, c.old)
+			err = atomicWriteMode(c.path, c.old, c.mode)
 		} else {
 			err = os.Remove(c.path)
 			if errors.Is(err, fs.ErrNotExist) {
@@ -128,6 +146,26 @@ func restore(changes []change) error {
 	}
 	return nil
 }
+func nginxHasStandardConfDInclude(conf []byte) bool {
+	const target = "/etc/nginx/conf.d/*.conf"
+	for _, raw := range strings.Split(string(conf), "\n") {
+		line := raw
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasSuffix(line, ";") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimSuffix(line, ";"))
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "include" && fields[1] == target {
+			return true
+		}
+	}
+	return false
+}
+
 func collect() (plan, error) {
 	var p plan
 	if exists("/etc/apache2/conf-enabled") && tool("apache2ctl") {
@@ -136,7 +174,6 @@ func collect() (plan, error) {
 		if err := addFile(&p, path, data); err != nil {
 			return p, err
 		}
-		p.reload = append(p.reload, "apache2")
 	}
 	if exists("/etc/nginx/conf.d") && tool("nginx") {
 		// Only use the standard conf.d include; do not alter the main nginx.conf.
@@ -144,12 +181,11 @@ func collect() (plan, error) {
 		if err != nil {
 			return p, err
 		}
-		if strings.Contains(string(conf), "include /etc/nginx/conf.d/*.conf;") {
+		if nginxHasStandardConfDInclude(conf) {
 			path := "/etc/nginx/conf.d/zz-portguard-mini.conf"
 			if err := addFile(&p, path, marker+"server_tokens off;\n"); err != nil {
 				return p, err
 			}
-			p.reload = append(p.reload, "nginx")
 		} else {
 			fmt.Println("WARN nginx: standard conf.d include missing; manual review needed")
 		}
@@ -163,31 +199,24 @@ func collect() (plan, error) {
 			continue
 		}
 		file := filepath.Join(dir, "99-portguard-mini.ini")
-		if err := addFile(&p, file, marker+"expose_php = Off\ndisplay_errors = Off\n"); err != nil {
+		if err := addFile(&p, file, iniMarker+"expose_php = Off\ndisplay_errors = Off\n"); err != nil {
 			return p, err
 		}
-		if sapi == "fpm" {
-			version := filepath.Base(filepath.Dir(filepath.Dir(dir)))
-			service := "php" + version + "-fpm"
-			if tool("systemctl") {
-				p.reload = append(p.reload, service)
-			}
-		}
+
 	}
 	// Ubuntu OpenSSH supports DebianBanner. The existing admin-managed
 	// 00-portguard.conf is left untouched when already effective.
 	if tool("sshd") && exists("/etc/ssh/sshd_config.d") {
 		value, err := sshBannerSetting()
 		if err != nil {
-			return p, err
-		}
-		if value != "no" {
+			fmt.Printf("WARN SSH: %v; SSH configuration skipped\n", err)
+		} else if value != "no" {
 			if err := addFile(&p, sshManagedPath, marker+"DebianBanner no\n"); err != nil {
 				return p, err
 			}
-			p.reload = append(p.reload, "ssh")
 		}
 	}
+	p.reload = affectedServices(p.files)
 	return p, nil
 }
 func sshBannerSetting() (string, error) {
@@ -227,8 +256,8 @@ func validate(services []string) error {
 			}
 		default:
 			if strings.HasPrefix(s, "php") && strings.HasSuffix(s, "-fpm") {
-				bin := strings.TrimSuffix(s, "-fpm") + "-fpm"
-				if tool(bin) {
+				bin := phpFPMBinary(s)
+				if tool(bin) || serviceActive(s) {
 					if err := run(bin, "-t"); err != nil {
 						return err
 					}
@@ -257,6 +286,10 @@ func apply() error {
 	if err != nil {
 		return err
 	}
+	return applyPlan(p)
+}
+
+func applyPlan(p plan) error {
 	if len(p.files) == 0 {
 		fmt.Println("OK: managed configurations already up to date")
 		return nil
@@ -264,20 +297,12 @@ func apply() error {
 	fmt.Printf("Applying %d managed configuration files\n", len(p.files))
 	written := []change{}
 	for _, c := range p.files {
-		var content string
-		switch {
-		case c.path == sshManagedPath:
-			content = marker + "DebianBanner no\n"
-		case strings.Contains(c.path, "apache2"):
-			content = marker + "ServerTokens Prod\nServerSignature Off\nTraceEnable Off\n"
-		case strings.Contains(c.path, "nginx"):
-			content = marker + "server_tokens off;\n"
-		default:
-			content = marker + "expose_php = Off\ndisplay_errors = Off\n"
+		mode := fs.FileMode(0644)
+		if c.existed {
+			mode = c.mode
 		}
-		if err := atomicWrite(c.path, []byte(content)); err != nil {
-			_ = restore(written)
-			return fmt.Errorf("write %s: %w", c.path, err)
+		if err := atomicWriteMode(c.path, c.body, mode); err != nil {
+			return fmt.Errorf("write %s failed; rollback=%v: %w", c.path, restore(written), err)
 		}
 		written = append(written, c)
 		fmt.Println("UPDATED", c.path)
@@ -291,12 +316,7 @@ func apply() error {
 			continue
 		}
 		if err := run("systemctl", "reload", s); err != nil {
-			restoreErr := restore(written)
-			for _, x := range unique(p.reload) {
-				if serviceActive(x) {
-					_ = run("systemctl", "reload", x)
-				}
-			}
+			restoreErr := restoreAndReload(written, p.reload)
 			return fmt.Errorf("reload %s failed; rollback=%v: %w", s, restoreErr, err)
 		}
 		fmt.Println("RELOADED", s)
@@ -304,59 +324,129 @@ func apply() error {
 	fmt.Println("OK: hardening applied and services validated")
 	return nil
 }
+
+// Preflight every file before making any change; never remove an unmanaged file.
+func removalPlan(paths []string) ([]change, error) {
+	var changes []change
+	for _, path := range paths {
+		st, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("refusing to remove non-regular file: %s", path)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if !managed(b) {
+			return nil, fmt.Errorf("refusing to remove unmanaged file: %s", path)
+		}
+		changes = append(changes, change{path: path, old: b, existed: true, mode: st.Mode().Perm()})
+	}
+	return changes, nil
+}
+
+// Debian/Ubuntu ships php-fpm8.x, while its systemd unit is php8.x-fpm.
+func phpFPMBinary(service string) string {
+	return "php-fpm" + strings.TrimSuffix(strings.TrimPrefix(service, "php"), "-fpm")
+}
+
+func affectedServices(changes []change) []string {
+	var services []string
+	for _, c := range changes {
+		switch c.path {
+		case sshManagedPath:
+			if tool("sshd") || serviceActive("ssh") {
+				services = append(services, "ssh")
+			}
+		case "/etc/apache2/conf-enabled/zz-portguard-mini.conf":
+			if tool("apache2ctl") || serviceActive("apache2") {
+				services = append(services, "apache2")
+			}
+		case "/etc/nginx/conf.d/zz-portguard-mini.conf":
+			if tool("nginx") || serviceActive("nginx") {
+				services = append(services, "nginx")
+			}
+		default:
+			dir := filepath.Dir(filepath.Dir(c.path))
+			switch filepath.Base(dir) {
+			case "apache2":
+				if tool("apache2ctl") || serviceActive("apache2") {
+					services = append(services, "apache2")
+				}
+			case "fpm":
+				service := "php" + filepath.Base(filepath.Dir(dir)) + "-fpm"
+				if tool(phpFPMBinary(service)) || serviceActive(service) {
+					services = append(services, service)
+				}
+			}
+		}
+	}
+	return unique(services)
+}
+func restoreAndReload(changes []change, services []string) error {
+	err := restore(changes)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, service := range unique(services) {
+		if serviceActive(service) {
+			if e := run("systemctl", "reload", service); e != nil {
+				errs = append(errs, e)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
 func rollback() error {
 	if os.Geteuid() != 0 {
 		return errors.New("rollback requires root")
 	}
 	paths := []string{"/etc/apache2/conf-enabled/zz-portguard-mini.conf", "/etc/nginx/conf.d/zz-portguard-mini.conf", sshManagedPath}
 	dirs, _ := filepath.Glob("/etc/php/*/*/conf.d/99-portguard-mini.ini")
-	paths = append(paths, dirs...)
+	for _, path := range dirs {
+		switch filepath.Base(filepath.Dir(filepath.Dir(path))) {
+		case "fpm", "apache2", "cgi":
+			paths = append(paths, path)
+		}
+	}
+	changes, err := removalPlan(paths)
+	if err != nil {
+		return err
+	}
+	return rollbackChanges(changes, affectedServices(changes))
+}
+
+func rollbackChanges(changes []change, services []string) error {
 	var removed []change
-	for _, path := range paths {
-		b, err := os.ReadFile(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+	for _, c := range changes {
+		if err := os.Remove(c.path); err != nil {
+			return fmt.Errorf("remove %s failed; restoration=%v: %w", c.path, restore(removed), err)
+		}
+		removed = append(removed, c)
+		fmt.Println("REMOVED", c.path)
+	}
+	for _, service := range services {
+		var err error
+		if service == "ssh" {
+			err = run("sshd", "-t")
+		} else {
+			err = validate([]string{service})
 		}
 		if err != nil {
-			return err
-		}
-		if !strings.HasPrefix(string(b), marker) {
-			return fmt.Errorf("refusing to remove unmanaged file: %s", path)
-		}
-		removed = append(removed, change{path, b, true})
-		if err := os.Remove(path); err != nil {
-			_ = restore(removed)
-			return err
-		}
-		fmt.Println("REMOVED", path)
-	}
-	services := []string{"apache2", "nginx"}
-	for _, c := range removed {
-		if c.path == sshManagedPath {
-			services = append(services, "ssh")
+			return fmt.Errorf("rollback validation failed; restoration=%v: %w", restore(removed), err)
 		}
 	}
-	for _, dir := range dirs {
-		v := regexp.MustCompile(`/etc/php/([^/]+)/fpm/`).FindStringSubmatch(dir)
-		if len(v) > 1 {
-			services = append(services, "php"+v[1]+"-fpm")
-		}
-	}
-	for _, service := range unique(services) {
-		if service == "ssh" {
-			if err := run("sshd", "-t"); err != nil {
-				_ = restore(removed)
-				return err
-			}
-		} else if err := validate([]string{service}); err != nil {
-			_ = restore(removed)
-			return err
-		}
-	}
-	for _, s := range unique(services) {
-		if serviceActive(s) {
-			if err := run("systemctl", "reload", s); err != nil {
-				return err
+	for _, service := range services {
+		if serviceActive(service) {
+			if err := run("systemctl", "reload", service); err != nil {
+				return fmt.Errorf("rollback reload failed; restoration=%v: %w", restoreAndReload(removed, services), err)
 			}
 		}
 	}
@@ -399,10 +489,10 @@ func baseline() error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(statePath, append(b, '\n')); err != nil {
-		return err
-	}
-	if err := os.Chmod(statePath, 0600); err != nil {
+	if err := atomicWriteFile(statePath, append(b, '\n'), 0600, false); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("port baseline exists (%s); refuse overwrite; review alerts first", statePath)
+		}
 		return err
 	}
 	fmt.Println("BASELINE SAVED", statePath)

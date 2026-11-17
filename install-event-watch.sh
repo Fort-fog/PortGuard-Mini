@@ -4,10 +4,25 @@
 set -eu
 if [ "$(id -u)" -ne 0 ]; then echo 'Run as root' >&2; exit 1; fi
 if [ ! -x /usr/local/sbin/portguard ]; then echo 'Missing installed /usr/local/sbin/portguard' >&2; exit 1; fi
-if [ -e /etc/systemd/system/portguard-event.service ]; then
+if [ -e /etc/systemd/system/portguard-event.service ] || [ -L /etc/systemd/system/portguard-event.service ] ||
+    [ -e /etc/systemd/system/multi-user.target.wants/portguard-event.service ] || [ -L /etc/systemd/system/multi-user.target.wants/portguard-event.service ] ||
+    systemctl cat portguard-event.service >/dev/null 2>&1; then
     echo 'Refusing to overwrite existing portguard-event.service' >&2
     exit 1
 fi
+cleanup() {
+    status=$?
+    trap - 0 HUP INT TERM
+    if [ "$status" -ne 0 ]; then
+        echo 'Event watcher installation failed; removing partial installation' >&2
+        systemctl disable --now portguard-event.service || echo 'WARNING: event watcher stop failed' >&2
+        rm -f /etc/systemd/system/portguard-event.service || echo 'WARNING: unit cleanup failed' >&2
+        systemctl daemon-reload || echo 'WARNING: daemon-reload failed' >&2
+    fi
+    exit "$status"
+}
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
 cat > /etc/systemd/system/portguard-event.service <<'SERVICE'
 [Unit]
 Description=PortGuard Mini file change events (read only)

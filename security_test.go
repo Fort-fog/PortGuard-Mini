@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestSecurityInventoryDetectsAddChangeDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	alerts := strings.Join(securityDifferences(old, now), "\n")
-	if !strings.Contains(alerts, "MODIFIED "+a) || !strings.Contains(alerts, "ADDED "+b) {
+	if !strings.Contains(alerts, "MODIFIED "+strconv.Quote(a)) || !strings.Contains(alerts, "ADDED "+strconv.Quote(b)) {
 		t.Fatal(alerts)
 	}
 	if err := os.Remove(a); err != nil {
@@ -40,7 +41,7 @@ func TestSecurityInventoryDetectsAddChangeDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	alerts = strings.Join(securityDifferences(now, last), "\n")
-	if !strings.Contains(alerts, "REMOVED "+a) {
+	if !strings.Contains(alerts, "REMOVED "+strconv.Quote(a)) {
 		t.Fatal(alerts)
 	}
 }

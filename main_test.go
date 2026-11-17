@@ -72,3 +72,55 @@ func TestSSHEffectiveSettingParsing(t *testing.T) {
 		t.Fatal("should refuse overwrite of manually managed SSH file")
 	}
 }
+
+func TestNginxStandardConfDIncludeParsing(t *testing.T) {
+	tests := []struct {
+		name string
+		conf string
+		want bool
+	}{
+		{
+			name: "standard",
+			conf: "http {\n    include /etc/nginx/conf.d/*.conf;\n}\n",
+			want: true,
+		},
+		{
+			name: "multiple spaces",
+			conf: "http {\n    include    /etc/nginx/conf.d/*.conf   ;\n}\n",
+			want: true,
+		},
+		{
+			name: "tabs",
+			conf: "http {\n\tinclude\t/etc/nginx/conf.d/*.conf\t;\n}\n",
+			want: true,
+		},
+		{
+			name: "trailing comment",
+			conf: "http {\n    include /etc/nginx/conf.d/*.conf; # managed includes\n}\n",
+			want: true,
+		},
+		{
+			name: "commented out",
+			conf: "http {\n    # include /etc/nginx/conf.d/*.conf;\n}\n",
+			want: false,
+		},
+		{
+			name: "substring in comment",
+			conf: "http {\n    server_tokens off; # include /etc/nginx/conf.d/*.conf;\n}\n",
+			want: false,
+		},
+		{
+			name: "different include",
+			conf: "http {\n    include /etc/nginx/sites-enabled/*;\n}\n",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nginxHasStandardConfDInclude([]byte(tt.conf)); got != tt.want {
+				t.Fatalf("nginxHasStandardConfDInclude() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

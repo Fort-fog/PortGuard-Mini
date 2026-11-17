@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -85,5 +86,17 @@ func TestEventWatcherGracefulStopAfterIdle(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("idle watcher did not stop")
+	}
+}
+
+func TestEventWatcherInvalidatedCoverageRequiresRestart(t *testing.T) {
+	for _, mask := range []uint32{syscall.IN_Q_OVERFLOW, syscall.IN_MOVE_SELF, syscall.IN_DELETE_SELF, syscall.IN_IGNORED, syscall.IN_ISDIR | syscall.IN_MOVED_FROM} {
+		w := &eventWatcher{byWD: map[int]string{1: "/fake-directory"}, byPath: map[string]int{"/fake-directory": 1}}
+		event := make([]byte, 16)
+		binary.LittleEndian.PutUint32(event[0:4], 1)
+		binary.LittleEndian.PutUint32(event[4:8], mask)
+		if err := w.process(event); err == nil {
+			t.Fatalf("watch invalidation not propagated for mask %x", mask)
+		}
 	}
 }
